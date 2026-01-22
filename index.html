@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Dodge the Box — OOP Refactor</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(circle at top, #1a1f3c, #070910);
+      color: white;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    #container { display: flex; gap: 24px; }
+    canvas {
+      background: rgba(10, 12, 30, 0.95);
+      border-radius: 18px;
+      box-shadow: inset 0 0 80px rgba(255,255,255,0.04), 0 50px 120px rgba(0,0,0,0.7);
+    }
+    #ui {
+      width: 210px;
+      padding: 16px;
+      background: rgba(10, 12, 30, 0.85);
+      border-radius: 16px;
+    }
+    h1 { position: absolute; top: 32px; font-size: 32px; }
+    .stat { margin-bottom: 10px; }
+    #overlay {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.8);
+      flex-direction: column;
+      backdrop-filter: blur(6px);
+    }
+    #overlay button { padding: 10px 18px; border-radius: 10px; border: none; cursor: pointer; }
+  </style>
+</head>
+<body>
+<h1>Dodge the Box</h1>
+<div id="container">
+  <canvas id="game" width="440" height="440"></canvas>
+  <div id="ui">
+    <div class="stat">Score: <span id="score">0</span></div>
+    <div class="stat">Combo: x<span id="combo">1</span></div>
+    <div class="stat">Coins: <span id="coins">0</span></div>
+    <div class="stat">Speed Lv: <span id="speed">1</span></div>
+    <div class="stat">Dash: <span id="dash">READY</span></div>
+    <hr />
+    <small>WASD / Arrows<br>Space = Dash</small>
+  </div>
+</div>
+
+<div id="overlay">
+  <h2>Game Over</h2>
+  <p>Final Score: <span id="finalScore"></span></p>
+  <button id="restart">Restart</button>
+</div>
+
+<script>
+/* ================= UTILITIES ================= */
+class Input {
+  constructor() {
+    this.keys = {};
+    window.addEventListener('keydown', e => this.keys[e.key] = true);
+    window.addEventListener('keyup', e => this.keys[e.key] = false);
+  }
+}
+
+class Vector {
+  static normalize(x, y) {
+    const m = Math.hypot(x, y) || 1;
+    return { x: x / m, y: y / m };
+  }
+}
+
+/* ================= BASE ENTITY ================= */
+class Entity {
+  constructor(x, y, size) {
+    this.x = x;
+    this.y = y;
+    this.size = size;
+  }
+
+  distanceTo(other) {
+    return Math.hypot(this.x - other.x, this.y - other.y);
+  }
+}
+
+/* ================= PLAYER ================= */
+class Player extends Entity {
+  constructor(x, y) {
+    super(x, y, 36);
+    this.speed = 1.9;
+    this.dashPower = 130;
+    this.dashCooldown = 0;
+    this.dashCooldownTime = 120;
+    this.trails = [];
+  }
+
+  update(input, arena) {
+    let vx = 0, vy = 0;
+    if (input.keys['w'] || input.keys['ArrowUp']) vy--;
+    if (input.keys['s'] || input.keys['ArrowDown']) vy++;
+    if (input.keys['a'] || input.keys['ArrowLeft']) vx--;
+    if (input.keys['d'] || input.keys['ArrowRight']) vx++;
+
+    const dir = Vector.normalize(vx, vy);
+    this.x += dir.x * this.speed;
+    this.y += dir.y * this.speed;
+
+    // Dash
+    if (input.keys[' '] && this.dashCooldown <= 0 && (vx || vy)) {
+      this.x += dir.x * this.dashPower;
+      this.y += dir.y * this.dashPower;
+      this.dashCooldown = this.dashCooldownTime;
+      for (let i = 0; i < 8; i++) this.trails.push({ x: this.x, y: this.y, life: 20 });
+    }
+
+    this.dashCooldown--;
+
+    // Trails
+    this.trails.forEach(t => t.life--);
+    this.trails = this.trails.filter(t => t.life > 0);
+
+    // Clamp
+    const h = this.size / 2;
+    this.x = Math.max(h, Math.min(arena - h, this.x));
+    this.y = Math.max(h, Math.min(arena - h, this.y));
+
+    return dir;
+  }
+}
+
+/* ================= ENEMY ================= */
+class Enemy extends Entity {
+  constructor(x, y) {
+    super(x, y, 38);
+    this.speed = 1.8;
+  }
+
+  update(player, playerDir, score) {
+    const futureX = player.x + playerDir.x * 40;
+    const futureY = player.y + playerDir.y * 40;
+    const dx = futureX - this.x;
+    const dy = futureY - this.y;
+    const dist = Math.hypot(dx, dy) || 1;
+
+    const difficulty = 1 + score * 0.0006;
+    this.x += (dx / dist) * this.speed * difficulty;
+    this.y += (dy / dist) * this.speed * difficulty;
+  }
+}
+
+/* ================= COIN ================= */
+class Coin {
+  constructor() {
+    this.x = Math.random() * 400 + 20;
+    this.y = Math.random() * 400 + 20;
+    this.r = 7;
+  }
+}
+
+/* ================= GAME ================= */
+class Game {
+  constructor() {
+    this.canvas = document.getElementById('game');
+    this.ctx = this.canvas.getContext('2d');
+    this.input = new Input();
+
+    this.player = new Player(220, 220);
+    this.enemy = new Enemy(60, 60);
+    this.coins = [new Coin(), new Coin(), new Coin()];
+
+    this.score = 0;
+    this.combo = 1;
+    this.comboTimer = 0;
+    this.coinCount = 0;
+    this.speedLevel = 1;
+    this.gameOver = false;
+
+    document.getElementById('restart').onclick = () => location.reload();
+    requestAnimationFrame(() => this.loop());
+  }
+
+  updateUI() {
+    score.textContent = this.score;
+    coins.textContent = this.coinCount;
+    speed.textContent = this.speedLevel;
+    combo.textContent = this.combo;
+    dash.textContent = this.player.dashCooldown <= 0 ? 'READY' : '...';
+  }
+
+  update() {
+    if (this.gameOver) return;
+
+    const dir = this.player.update(this.input, this.canvas.width);
+    this.enemy.update(this.player, dir, this.score);
+
+    // Collision
+    if (this.player.distanceTo(this.enemy) < (this.player.size + this.enemy.size) / 2) {
+      this.endGame();
+    }
+
+    // Coins
+    this.coins = this.coins.filter(c => {
+      if (Math.hypot(this.player.x - c.x, this.player.y - c.y) < this.player.size) {
+        this.coinCount++;
+        this.combo++;
+        this.comboTimer = 120;
+        this.score += 20 * this.combo;
+        if (this.coinCount % 3 === 0) { this.speedLevel++; this.player.speed += 0.4; }
+        if (this.coinCount % 5 === 0) {
+          this.player.dashPower += 15;
+          this.player.dashCooldownTime = Math.max(60, this.player.dashCooldownTime - 10);
+          this.enemy.speed *= 0.97;
+        }
+        return false;
+      }
+      return true;
+    });
+
+    if (Math.random() < 0.01 && this.coins.length < 9) this.coins.push(new Coin());
+
+    this.comboTimer--;
+    if (this.comboTimer <= 0) this.combo = 1;
+
+    this.score++;
+    this.updateUI();
+  }
+
+  drawEntity(e, c1, c2) {
+    const r = e.size / 2;
+    const g = this.ctx.createLinearGradient(e.x - r, e.y - r, e.x + r, e.y + r);
+    g.addColorStop(0, c1); g.addColorStop(1, c2);
+    this.ctx.fillStyle = g;
+    this.ctx.shadowBlur = 20;
+    this.ctx.beginPath();
+    this.ctx.roundRect(e.x - r, e.y - r, e.size, e.size, 12);
+    this.ctx.fill();
+  }
+
+  draw() {
+    this.ctx.clearRect(0, 0, 440, 440);
+
+    // Grid
+    this.ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    for (let i = 0; i < 440; i += 40) {
+      this.ctx.beginPath(); this.ctx.moveTo(i, 0); this.ctx.lineTo(i, 440); this.ctx.stroke();
+      this.ctx.beginPath(); this.ctx.moveTo(0, i); this.ctx.lineTo(440, i); this.ctx.stroke();
+    }
+
+    // Trails
+    this.player.trails.forEach(t => {
+      this.ctx.globalAlpha = t.life / 20;
+      this.drawEntity({ ...this.player, x: t.x, y: t.y }, '#3cf2ff', '#7c7cff');
+      this.ctx.globalAlpha = 1;
+    });
+
+    // Coins
+    this.coins.forEach(c => {
+      const g = this.ctx.createRadialGradient(c.x, c.y, 1, c.x, c.y, 16);
+      g.addColorStop(0, '#fff4a3'); g.addColorStop(1, '#ffb703');
+      this.ctx.fillStyle = g;
+      this.ctx.beginPath(); this.ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2); this.ctx.fill();
+    });
+
+    this.drawEntity(this.player, '#3cf2ff', '#7c7cff');
+    this.drawEntity(this.enemy, '#ff5c7a', '#ff2e63');
+  }
+
+  loop() {
+    this.update();
+    this.draw();
+    requestAnimationFrame(() => this.loop());
+  }
+
+  endGame() {
+    this.gameOver = true;
+    finalScore.textContent = this.score;
+    overlay.style.display = 'flex';
+  }
+}
+
+new Game();
+</script>
+</body>
+</html>
+
